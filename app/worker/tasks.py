@@ -51,22 +51,9 @@ async def _extract_content(workflow_uuid: uuid.UUID):
             # 2. Get file from storage
             file_bytes = await storage_service.get_file(document.storage_key)
             
-            # 3. Extract text based on content type
-            text = ""
-            if document.content_type == "application/pdf":
-                doc = fitz.open(stream=file_bytes, filetype="pdf")
-                text = "\n".join([page.get_text() for page in doc])
-                doc.close()
-            elif document.content_type == "text/plain":
-                text = file_bytes.decode("utf-8")
-            elif document.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                doc = DocxDocument(io.BytesIO(file_bytes))
-                text = "\n".join([para.text for para in doc.paragraphs])
-            else:
-                raise ValueError(f"Unsupported content type: {document.content_type}")
-
-            # Normalize whitespace
-            text = " ".join(text.split())
+            # 3. Extract text using ExtractionService
+            from app.services.extraction import extraction_service
+            text = extraction_service.extract_text(file_bytes, document.content_type)
 
             # 4. Save content
             content = DocumentContent(
