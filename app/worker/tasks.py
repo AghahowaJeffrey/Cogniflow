@@ -146,9 +146,65 @@ async def _analyze_content(workflow_uuid: uuid.UUID):
             await db.commit()
             logger.info("AI analysis completed", workflow_id=str(workflow_uuid))
 
+            # Trigger Validation stage
+            validate_document.send(str(workflow_id))
+
         except Exception as e:
+            # ... (rest of analysis error handling)
             await db.rollback()
             logger.error("AI Analysis failed", workflow_id=str(workflow_uuid), error=str(e))
             workflow.status = WorkflowStatus.FAILED
             workflow.error_message = str(e)
+            await db.commit()
+
+@dramatiq.actor
+def validate_document(workflow_id: str):
+    workflow_uuid = uuid.UUID(workflow_id)
+    logger.info("Starting validation", workflow_id=workflow_id)
+
+    async_to_sync(_validate_analysis(workflow_uuid))
+
+async def _validate_analysis(workflow_uuid: uuid.UUID):
+    from app.schemas.analysis import DocumentAnalysis
+    from app.services.evaluation import evaluation_service
+    from app.models.base import AnalysisResult
+
+    async with SessionLocal() as db:
+        result = await db.execute(
+            select(Workflow, AnalysisResult).join(AnalysisResult).where(Workflow.id == workflow_uuid)
+        )
+        row = result.first()
+        if not row:
+            logger.error("Workflow or analysis result not found", workflow_id=str(workflow_uuid))
+            return
+
+        workflow, analysis_result = row
+        workflow.status = WorkflowStatus.VALIDATING
+        workflow.current_stage = "validating"
+        await db.commit()
+
+        try:
+            # 1. Validate Schema
+            analysis = DocumentAnalysis(**analysis_result.result_json)
+            
+            # 2. Evaluate/Score
+            score = evaluation_service.calculate_score(analysis)
+            
+            # 3. Update Result
+            analysis_result.validation_status = "validated"
+            analysis_result.evaluation_score = score
+            
+            # 4. Finalize Workflow
+            workflow.status = WorkflowStatus.COMPLETED
+            workflow.current_stage = "completed"
+            workflow.completed_at = datetime.now(timezone.utc)
+            
+            await db.commit()
+            logger.info("Validation and evaluation completed", workflow_id=str(workflow_uuid), score=score)
+
+        except Exception as e:
+            await db.rollback()
+            logger.error("Validation failed", workflow_id=str(workflow_uuid), error=str(e))
+            workflow.status = WorkflowStatus.FAILED
+            workflow.error_message = f"Validation Error: {str(e)}"
             await db.commit()
