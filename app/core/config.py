@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = "sk-placeholder"
     LLM_PROVIDER: str = "openai"
     LLM_MODEL: str = "gpt-4o"
+    LLM_FALLBACK_MODEL: str = "gpt-3.5-turbo"
+
+    # Reliability
+    CIRCUIT_BREAKER_THRESHOLD: int = 5
+    CIRCUIT_BREAKER_WINDOW: int = 60  # seconds
 
     model_config = SettingsConfigDict(case_sensitive=True, env_file=".env")
 

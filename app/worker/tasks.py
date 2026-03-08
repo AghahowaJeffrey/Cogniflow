@@ -22,7 +22,7 @@ def async_to_sync(awaitable):
         return loop.run_until_complete(awaitable)
     return asyncio.run(awaitable)
 
-@dramatiq.actor
+@dramatiq.actor(max_retries=3, min_backoff=1000, max_backoff=60000)
 def extract_document_content(workflow_id: str):
     workflow_uuid = uuid.UUID(workflow_id)
     logger.info("Starting document extraction", workflow_id=workflow_id)
@@ -74,17 +74,20 @@ async def _extract_content(workflow_uuid: uuid.UUID):
                         text_length=len(text))
 
             # Trigger next stage (AI Analysis)
-            analyze_document.send(str(workflow_id))
+            analyze_document.send(str(workflow_uuid))
 
         except Exception as e:
-            # ... (rest of extraction error handling)
             await db.rollback()
-            logger.error("Extraction failed", workflow_id=str(workflow_uuid), error=str(e))
-            workflow.status = WorkflowStatus.FAILED
+            workflow.attempt_count += 1
+            if workflow.attempt_count >= 3:
+                workflow.status = WorkflowStatus.DEAD_LETTER
+            else:
+                workflow.status = WorkflowStatus.FAILED
             workflow.error_message = str(e)
             await db.commit()
+            raise
 
-@dramatiq.actor
+@dramatiq.actor(max_retries=5, min_backoff=2000, max_backoff=120000)
 def analyze_document(workflow_id: str):
     workflow_uuid = uuid.UUID(workflow_id)
     logger.info("Starting AI analysis", workflow_id=workflow_id)
@@ -147,17 +150,20 @@ async def _analyze_content(workflow_uuid: uuid.UUID):
             logger.info("AI analysis completed", workflow_id=str(workflow_uuid))
 
             # Trigger Validation stage
-            validate_document.send(str(workflow_id))
+            validate_document.send(str(workflow_uuid))
 
         except Exception as e:
-            # ... (rest of analysis error handling)
             await db.rollback()
-            logger.error("AI Analysis failed", workflow_id=str(workflow_uuid), error=str(e))
-            workflow.status = WorkflowStatus.FAILED
+            workflow.attempt_count += 1
+            if workflow.attempt_count >= 5:
+                workflow.status = WorkflowStatus.DEAD_LETTER
+            else:
+                workflow.status = WorkflowStatus.FAILED
             workflow.error_message = str(e)
             await db.commit()
+            raise
 
-@dramatiq.actor
+@dramatiq.actor(max_retries=3)
 def validate_document(workflow_id: str):
     workflow_uuid = uuid.UUID(workflow_id)
     logger.info("Starting validation", workflow_id=workflow_id)
@@ -204,7 +210,11 @@ async def _validate_analysis(workflow_uuid: uuid.UUID):
 
         except Exception as e:
             await db.rollback()
-            logger.error("Validation failed", workflow_id=str(workflow_uuid), error=str(e))
-            workflow.status = WorkflowStatus.FAILED
+            workflow.attempt_count += 1
+            if workflow.attempt_count >= 3:
+                workflow.status = WorkflowStatus.DEAD_LETTER
+            else:
+                workflow.status = WorkflowStatus.FAILED
             workflow.error_message = f"Validation Error: {str(e)}"
             await db.commit()
+            raise

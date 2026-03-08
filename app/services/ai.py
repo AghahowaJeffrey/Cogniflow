@@ -3,6 +3,7 @@ import httpx
 import structlog
 from typing import Any, Dict, Optional
 from app.core.config import settings
+from app.core.reliability import circuit_breaker, CircuitBreakerOpenError
 
 logger = structlog.get_logger()
 
@@ -10,40 +11,46 @@ class AIService:
     def __init__(self):
         self.api_key = settings.OPENAI_API_KEY
         self.provider = settings.LLM_PROVIDER
-        self.model = settings.LLM_MODEL
+        self.primary_model = settings.LLM_MODEL
+        self.fallback_model = settings.LLM_FALLBACK_MODEL
 
     async def analyze_text(self, text: str, prompt_template: str) -> Dict[str, Any]:
-        """Call LLM provider to analyze text using a prompt template."""
+        """Call LLM provider with circuit breaker and fallback logic."""
         start_time = time.time()
         prompt = prompt_template.replace("{{text}}", text)
-
-        # In a real implementation, we would call OpenAI/Anthropic/etc here.
-        # For now, we'll implement a robust wrapper that simulates the call
-        # but is ready for real API integration.
         
+        current_model = self.primary_model
+        
+        if circuit_breaker.is_open():
+            logger.warning("Circuit open, using fallback model", model=self.fallback_model)
+            current_model = self.fallback_model
+
         try:
             # Simulated API call logic
-            # async with httpx.AsyncClient() as client:
-            #     response = await client.post(...)
+            # In production, this would be a real call to OpenAI/Anthropic
             
-            # Placeholder for demo purposes
-            # We assume the LLM returns structured JSON
+            # --- SIMULATION START ---
+            # Simulate a failure to test the circuit breaker if needed
+            # raise Exception("Simulated transient failure")
+            # --- SIMULATION END ---
             
             latency_ms = int((time.time() - start_time) * 1000)
             
-            # Mock tokens (In production, use tiktoken or provider feedback)
+            # Mock tokens
             prompt_tokens = len(prompt) // 4
             completion_tokens = 200
             total_tokens = prompt_tokens + completion_tokens
-            
-            # Mock cost (e.g., $0.01 per 1k tokens)
-            estimated_cost = (total_tokens / 1000) * 0.01
+            estimated_cost = (total_tokens / 1000) * (0.01 if current_model == self.primary_model else 0.002)
+
+            # Record success if we were trying primary and it worked
+            if current_model == self.primary_model:
+                circuit_breaker.record_success()
 
             return {
                 "raw_result": "{\"title\": \"Mock Analysis\", \"summary\": \"Simulated output\"}",
                 "metadata": {
                     "provider": self.provider,
-                    "model": self.model,
+                    "model": current_model,
                     "latency_ms": latency_ms,
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
@@ -52,7 +59,10 @@ class AIService:
                 }
             }
         except Exception as e:
-            logger.error("AI Analysis failed", error=str(e))
+            if current_model == self.primary_model:
+                circuit_breaker.record_failure()
+            
+            logger.error("AI Analysis failed", model=current_model, error=str(e))
             raise
 
 ai_service = AIService()
