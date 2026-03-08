@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     MINIO_ACCESS_KEY: str = "minioadmin"
     MINIO_SECRET_KEY: str = "minioadmin"
 
+    # AI Provider
+    OPENAI_API_KEY: str = "sk-placeholder"
+    LLM_PROVIDER: str = "openai"
+    LLM_MODEL: str = "gpt-4o"
+
     model_config = SettingsConfigDict(case_sensitive=True, env_file=".env")
 
 settings = Settings()

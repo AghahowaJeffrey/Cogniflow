@@ -73,12 +73,82 @@ async def _extract_content(workflow_uuid: uuid.UUID):
                         workflow_id=str(workflow_uuid), 
                         text_length=len(text))
 
-            # TODO: Trigger next stage (AI Analysis)
-            # analyze_document.send(str(workflow_id))
+            # Trigger next stage (AI Analysis)
+            analyze_document.send(str(workflow_id))
+
+        except Exception as e:
+            # ... (rest of extraction error handling)
+            await db.rollback()
+            logger.error("Extraction failed", workflow_id=str(workflow_uuid), error=str(e))
+            workflow.status = WorkflowStatus.FAILED
+            workflow.error_message = str(e)
+            await db.commit()
+
+@dramatiq.actor
+def analyze_document(workflow_id: str):
+    workflow_uuid = uuid.UUID(workflow_id)
+    logger.info("Starting AI analysis", workflow_id=workflow_id)
+
+    async_to_sync(_analyze_content(workflow_uuid))
+
+async def _analyze_content(workflow_uuid: uuid.UUID):
+    from app.services.ai import ai_service
+    from app.core.prompts import PROMPT_TEMPLATES
+    from app.models.base import LLMRequest, AnalysisResult
+
+    async with SessionLocal() as db:
+        # 1. Fetch data
+        result = await db.execute(
+            select(Workflow, DocumentContent).join(DocumentContent, Workflow.document_id == DocumentContent.document_id).where(Workflow.id == workflow_uuid)
+        )
+        row = result.first()
+        if not row:
+            logger.error("Workflow or content not found", workflow_id=str(workflow_uuid))
+            return
+
+        workflow, content = row
+        
+        try:
+            # 2. Call AI Service
+            template = PROMPT_TEMPLATES["document_analysis"]["v1"]
+            ai_data = await ai_service.analyze_text(content.extracted_text, template)
+            
+            # 3. Store LLMRequest metadata
+            meta = ai_data["metadata"]
+            llm_request = LLMRequest(
+                workflow_id=workflow.id,
+                provider=meta["provider"],
+                model=meta["model"],
+                prompt_template_version="v1",
+                latency_ms=meta["latency_ms"],
+                prompt_tokens=meta["prompt_tokens"],
+                completion_tokens=meta["completion_tokens"],
+                total_tokens=meta["total_tokens"],
+                estimated_cost=meta["estimated_cost"]
+            )
+            db.add(llm_request)
+
+            # 4. Advance workflow
+            workflow.status = WorkflowStatus.VALIDATING
+            workflow.current_stage = "validating"
+            
+            # Store raw result in AnalysisResult for next phase
+            import json
+            analysis_result = AnalysisResult(
+                workflow_id=workflow.id,
+                result_json=json.loads(ai_data["raw_result"]),
+                schema_version="v1",
+                validation_status="pending",
+                evaluation_score=0.0
+            )
+            db.add(analysis_result)
+            
+            await db.commit()
+            logger.info("AI analysis completed", workflow_id=str(workflow_uuid))
 
         except Exception as e:
             await db.rollback()
-            logger.error("Extraction failed", workflow_id=str(workflow_uuid), error=str(e))
+            logger.error("AI Analysis failed", workflow_id=str(workflow_uuid), error=str(e))
             workflow.status = WorkflowStatus.FAILED
             workflow.error_message = str(e)
             await db.commit()
